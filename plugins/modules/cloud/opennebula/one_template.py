@@ -77,6 +77,52 @@ author:
 '''
 
 EXAMPLES = '''
+- name: Fetch the TEMPLATE by id
+  community.general.one_template:
+    id: 6459
+  register: result
+
+- name: Print the TEMPLATE properties
+  ansible.builtin.debug:
+    var: result
+
+- name: Fetch the TEMPLATE by name
+  community.general.one_template:
+    name: tf-prd-users-workerredis-p6379a
+  register: result
+
+- name: Create a new or update an existing TEMPLATE
+  community.general.one_template:
+    name: generic-opensuse
+    template: |
+      CONTEXT = [
+        HOSTNAME = "generic-opensuse"
+      ]
+      CPU = "1"
+      CUSTOM_ATTRIBUTE = ""
+      DISK = [
+        CACHE = "writeback",
+        DEV_PREFIX = "sd",
+        DISCARD = "unmap",
+        IMAGE = "opensuse-leap-15.2",
+        IMAGE_UNAME = "oneadmin",
+        IO = "threads",
+        SIZE = "" ]
+      MEMORY = "2048"
+      NIC = [
+        MODEL = "virtio",
+        NETWORK = "testnet",
+        NETWORK_UNAME = "oneadmin" ]
+      OS = [
+        ARCH = "x86_64",
+        BOOT = "disk0" ]
+      SCHED_REQUIREMENTS = "CLUSTER_ID=\"100\""
+      VCPU = "2"
+
+- name: Delete the TEMPLATE by id
+  community.general.one_template:
+    id: 6459
+    state: absent
 '''
 
 RETURN = '''
@@ -90,6 +136,26 @@ name:
     type: str
     returned: success
     sample: app1
+group_id:
+    description: template's group id
+    type: int
+    returned: success
+    sample: 1
+group_name:
+    description: template's group name
+    type: str
+    returned: success
+    sample: one-users
+owner_id:
+    description: template's owner id
+    type: int
+    returned: success
+    sample: 143
+owner_name:
+    description: template's owner name
+    type: str
+    returned: success
+    sample: ansible-test
 '''
 
 try:
@@ -143,76 +209,39 @@ def get_template_info(template):
     return info
 
 
-def enable_image(module, client, image, enable):
-    image.info()
-    changed = False
-
-    state = image.state
-
-    if state not in [IMAGE_STATES.index('READY'), IMAGE_STATES.index('DISABLED'), IMAGE_STATES.index('ERROR')]:
-        if enable:
-            module.fail_json(msg="Cannot enable " + IMAGE_STATES[state] + " image!")
-        else:
-            module.fail_json(msg="Cannot disable " + IMAGE_STATES[state] + " image!")
-
-    if ((enable and state != IMAGE_STATES.index('READY')) or
-       (not enable and state != IMAGE_STATES.index('DISABLED'))):
-        changed = True
-
-    if changed and not module.check_mode:
-        client.call('image.enable', image.id, enable)
-
-    result = get_image_info(image)
-    result['changed'] = changed
-
-    return result
-
-
-def rename_image(module, client, image, new_name):
-    if new_name is None:
-        module.fail_json(msg="'new_name' option has to be specified when the state is 'renamed'")
-
-    if new_name == image.name:
-        result = get_image_info(image)
-        result['changed'] = False
-        return result
-
-    tmp_image = get_image_by_name(module, client, new_name)
-    if tmp_image:
-        module.fail_json(msg="Name '" + new_name + "' is already taken by IMAGE with id=" + str(tmp_image.id))
-
-    if not module.check_mode:
-        client.call('image.rename', image.id, new_name)
-
-    result = get_image_info(image)
-    result['changed'] = True
-    return result
-
-
-def delete_image(module, client, image):
-    if not image:
-        return {'changed': False}
-
-    return {'changed': True}
-
-
 def create_template(module, client, name, template_data):
-    tmp_template = get_template_by_name(module, client, name)
-    if tmp_template:
-        module.fail_json(msg="Name '" + name + "' is already taken by TEMPLATE with id=" + str(tmp_template.ID))
-    
-    #template_data["NAME"] = name
     if not module.check_mode:
         client.template.allocate("NAME = \"" + name + "\"\n" + template_data)
-    
+
     result = get_template_info(get_template_by_name(module, client, name))
     result['changed'] = True
 
     return result
 
 
-def get_connection_info(module):
+def update_template(module, client, template, template_data):
+    if not module.check_mode:
+        # 0 = replace the whole template
+        client.template.update(template.ID, template_data, 0)
 
+    result = get_template_info(get_template_by_id(module, client, template.ID))
+    # if the previous parsed template data is not equal to the updated one, this has changed
+    result['changed'] = template.TEMPLATE != result['template']
+
+    return result
+
+
+def delete_template(module, client, template):
+    if not template:
+        return {'changed': False}
+
+    if not module.check_mode:
+        client.template.delete(template.ID)
+
+    return {'changed': True}
+
+
+def get_connection_info(module):
     url = module.params.get('api_url')
     username = module.params.get('api_username')
     password = module.params.get('api_password')
@@ -279,21 +308,16 @@ def main():
         result = delete_template(module, client, template)
     else:
         if needs_creation:
+            if not template_data:
+                module.fail_json(msg="To create a new template, the `template` attribute needs to be set.")
+
             result = create_template(module, client, name, template_data)
         else:
-            result = get_template_info(template)
-            changed = False
-            result['changed'] = False
-                
-            #if enabled is not None:
-            #    result = enable_image(module, client, image, enabled)
-            #if state == "cloned":
-            #    result = clone_image(module, client, image, new_name)
-            #elif state == "renamed":
-            #    result = rename_image(module, client, image, new_name)
-
-        changed = changed or result['changed']
-        result['changed'] = changed
+            if template_data:
+                result = update_template(module, client, template, template_data)
+            else:
+                result = get_template_info(template)
+                result['changed'] = False
 
     module.exit_json(**result)
 
